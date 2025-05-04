@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>HLS Stream Test</title>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  </head>
+  <body>
+    <h1>HLS Player</h1>
+    <button onclick="reloadAll()">🔁 Reload Segments</button>
+    <button onclick="resetAll()">🧹 Reset All</button>
+    <video
+      id="video"
+      controls
+      autoplay
+      style="width: 100%; max-width: 600px"
+    ></video>
+
+    <h2>Available Segments</h2>
+    <ul id="segmentList"></ul>
+
+    <video
+      id="preview"
+      controls
+      style="width: 100%; max-width: 600px; margin-top: 20px"
+    ></video>
+
+    <script>
+      const video = document.getElementById("video");
+      const preview = document.getElementById("preview");
+      const segmentList = document.getElementById("segmentList");
+      const playlistUrl = "http://localhost:3000/playlist.m3u8";
+
+      let mainHls;
+      let previewHls;
+
+      function loadMainHls() {
+        if (Hls.isSupported()) {
+          if (mainHls) mainHls.destroy();
+          mainHls = new Hls({ enableWorker: true, lowLatencyMode: true });
+          mainHls.loadSource(playlistUrl + "?cacheBust=" + Date.now());
+          mainHls.attachMedia(video);
+        } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+          video.src = playlistUrl;
+        } else {
+          alert("HLS not supported in this browser");
+        }
+      }
+
+      async function loadSegmentList() {
+        try {
+          const res = await fetch(
+            "http://localhost:3000/debug-playlist?_=" + Date.now()
+          );
+          const text = await res.text();
+          const lines = text.split("\n");
+          let sequence = 0;
+          segmentList.innerHTML = lines
+            .map((line, index, arr) => {
+              if (line.endsWith(".ts")) {
+                const durationLine = arr[index - 1];
+                const durationMatch = durationLine.match(/#EXTINF:([\d\.]+),/);
+                const duration = durationMatch
+                  ? parseFloat(durationMatch[1])
+                  : 5;
+                return `<li><button onclick="playWrappedSegment('${line}', ${duration}, ${sequence++})">▶️ ${line} (${duration.toFixed(
+                  2
+                )}s)</button></li>`;
+              }
+              return "";
+            })
+            .join("");
+        } catch (err) {
+          segmentList.innerHTML = `<li>Error loading segment list</li>`;
+        }
+      }
+
+      function playWrappedSegment(segment, duration, sequence) {
+        const segmentUrl = `http://localhost:3000/${segment}`;
+        const virtualPlaylist = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:${Math.ceil(
+          duration
+        )}\n#EXT-X-MEDIA-SEQUENCE:${sequence}\n#EXTINF:${duration.toFixed(
+          3
+        )},\n${segmentUrl}\n#EXT-X-ENDLIST`;
+        const blob = new Blob([virtualPlaylist], {
+          type: "application/vnd.apple.mpegurl",
+        });
+        const objectURL = URL.createObjectURL(blob);
+
+        if (Hls.isSupported()) {
+          if (previewHls) previewHls.destroy();
+          previewHls = new Hls({ enableWorker: true, lowLatencyMode: true });
+          previewHls.loadSource(objectURL);
+          previewHls.attachMedia(preview);
+        } else if (preview.canPlayType("application/vnd.apple.mpegurl")) {
+          preview.src = objectURL;
+        } else {
+          alert("Your browser does not support HLS playback.");
+        }
+      }
+
+      function reloadAll() {
+        loadMainHls();
+        loadSegmentList();
+      }
+
+      async function resetAll() {
+        const res = await fetch("http://localhost:3000/reset", {
+          method: "POST",
+        });
+        if (res.ok) {
+          alert("All segments and playlist removed.");
+          reloadAll();
+        } else {
+          alert("Failed to reset segments.");
+        }
+      }
+
+      reloadAll();
+    </script>
+  </body>
+</html>
