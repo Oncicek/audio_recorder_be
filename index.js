@@ -2,12 +2,13 @@ import express from "express";
 import fs from "fs";
 import path from "path";
 import cors from "cors";
+import { execSync } from "child_process";
 
 const app = express();
 const PORT = 3000;
 const uploadDir = path.resolve("uploads");
 const playlistPath = path.join(uploadDir, "playlist.m3u8");
-const segmentDuration = 5; // in seconds
+const segmentDuration = 5; // default fallback
 
 app.use(cors());
 app.use(express.raw({ type: "*/*", limit: "10mb" }));
@@ -18,8 +19,19 @@ if (!fs.existsSync(uploadDir)) {
 
 app.use(express.static(uploadDir));
 
-let mediaSequence = 0;
-let segments = [];
+const segmentMeta = []; // Stores { filename, duration }
+let recordingStopped = false;
+
+function getSegmentDuration(filename) {
+  try {
+    const result = execSync(
+      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${filename}"`
+    );
+    return parseFloat(result.toString().trim()) || segmentDuration;
+  } catch {
+    return segmentDuration;
+  }
+}
 
 app.post("/upload", (req, res) => {
   const filename = req.headers["x-filename"];
@@ -32,22 +44,36 @@ app.post("/upload", (req, res) => {
   fs.writeFileSync(filepath, req.body);
   console.log("✅ Saved segment:", filename);
 
-  segments.push(filename);
+  const duration = getSegmentDuration(filepath);
+  segmentMeta.push({ filename, duration });
 
   const playlist = [
     "#EXTM3U",
     "#EXT-X-VERSION:3",
-    `#EXT-X-TARGETDURATION:${segmentDuration}`,
-    `#EXT-X-MEDIA-SEQUENCE:0`,
-    ...segments.map((seg) => `#EXTINF:${segmentDuration}.000,\n${seg}`),
-    "#EXT-X-ENDLIST",
+    "#EXT-X-START:TIME-OFFSET=0",
+    `#EXT-X-TARGETDURATION:${Math.ceil(
+      Math.max(...segmentMeta.map((s) => s.duration), segmentDuration)
+    )}`,
+    "#EXT-X-MEDIA-SEQUENCE:0",
+    ...segmentMeta.map(
+      ({ filename, duration }) => `#EXTINF:${duration.toFixed(3)},\n${filename}`
+    ),
+    ...(recordingStopped ? ["#EXT-X-ENDLIST"] : []),
     "",
   ].join("\n");
 
   fs.writeFileSync(playlistPath, playlist);
-  console.log("📝 Updated playlist.m3u8");
+  console.log("📝 Updated playlist.m3u8 with durations");
 
   res.status(200).send("OK");
+});
+
+app.post("/stop", (req, res) => {
+  recordingStopped = true;
+  console.log(
+    "⏹️ Recording stopped, future playlists will include EXT-X-ENDLIST"
+  );
+  res.status(200).send("Recording marked as stopped.");
 });
 
 app.get("/segments", (req, res) => {
@@ -73,52 +99,62 @@ app.post("/reset", (req, res) => {
     }
   }
 
-  segments = [];
-  mediaSequence = 0;
+  segmentMeta.length = 0;
+  recordingStopped = false;
 
   console.log(`🧹 Reset done. Deleted ${deleted} files.`);
   res.status(200).send("Reset complete");
 });
 
 app.get("/playlist.m3u8", (req, res) => {
-  const currentSegments = fs
-    .readdirSync(uploadDir)
-    .filter((f) => f.endsWith(".ts"))
-    .sort();
+  if (segmentMeta.length === 0) {
+    const tsFiles = fs
+      .readdirSync(uploadDir)
+      .filter((f) => f.endsWith(".ts"))
+      .sort();
 
-  if (currentSegments.length === 0) {
-    const emptyPlaylist = [
-      "#EXTM3U",
-      "#EXT-X-VERSION:3",
-      `#EXT-X-TARGETDURATION:${segmentDuration}`,
-      "#EXT-X-MEDIA-SEQUENCE:0",
-      "#EXT-X-ENDLIST",
-    ].join("\n");
+    if (tsFiles.length === 0) {
+      return res
+        .status(200)
+        .setHeader("Content-Type", "application/vnd.apple.mpegurl")
+        .send(
+          [
+            "#EXTM3U",
+            "#EXT-X-VERSION:3",
+            "#EXT-X-START:TIME-OFFSET=0",
+            `#EXT-X-TARGETDURATION:${segmentDuration}`,
+            "#EXT-X-MEDIA-SEQUENCE:0",
+            "#EXT-X-ENDLIST",
+          ].join("\n")
+        );
+    }
 
-    return res
-      .status(200)
-      .setHeader("Content-Type", "application/vnd.apple.mpegurl")
-      .send(emptyPlaylist);
+    const fallback = tsFiles.map((name) => ({
+      filename: name,
+      duration: segmentDuration,
+    }));
+    segmentMeta.push(...fallback);
   }
-
-  segments = currentSegments;
 
   const playlist = [
     "#EXTM3U",
     "#EXT-X-VERSION:3",
-    `#EXT-X-TARGETDURATION:${segmentDuration}`,
-    `#EXT-X-MEDIA-SEQUENCE:0`,
-    ...segments.map((seg) => `#EXTINF:${segmentDuration}.000,\n${seg}`),
-    "#EXT-X-ENDLIST",
+    "#EXT-X-START:TIME-OFFSET=0",
+    `#EXT-X-TARGETDURATION:${Math.ceil(
+      Math.max(...segmentMeta.map((s) => s.duration), segmentDuration)
+    )}`,
+    "#EXT-X-MEDIA-SEQUENCE:0",
+    ...segmentMeta.map(
+      ({ filename, duration }) => `#EXTINF:${duration.toFixed(3)},\n${filename}`
+    ),
+    ...(recordingStopped ? ["#EXT-X-ENDLIST"] : []),
     "",
   ].join("\n");
 
-  fs.writeFileSync(playlistPath, playlist);
-  console.log("🛠️ Rebuilt playlist.m3u8 from existing segments");
-
-  const content = fs.readFileSync(playlistPath, "utf-8");
-  res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
-  res.send(content);
+  res
+    .status(200)
+    .setHeader("Content-Type", "application/vnd.apple.mpegurl")
+    .send(playlist);
 });
 
 app.get("/debug-playlist", (req, res) => {
