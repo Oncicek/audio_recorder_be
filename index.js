@@ -12,21 +12,17 @@ const segmentDuration = 5; // in seconds
 app.use(cors());
 app.use(express.raw({ type: "*/*", limit: "10mb" }));
 
-// Ensure upload directory exists
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
-// Serve static files (segments + playlist + optional player.html)
 app.use(express.static(uploadDir));
 
-// Memory-based segment tracking
 let mediaSequence = 0;
 let segments = [];
 
 app.post("/upload", (req, res) => {
   const filename = req.headers["x-filename"];
-  const encodedPlaylist = req.headers["x-playlist"];
 
   if (!filename || !filename.endsWith(".ts")) {
     return res.status(400).send("Only .ts segments are accepted");
@@ -36,19 +32,30 @@ app.post("/upload", (req, res) => {
   fs.writeFileSync(filepath, req.body);
   console.log("✅ Saved segment:", filename);
 
-  if (encodedPlaylist) {
-    try {
-      const decoded = decodeURIComponent(encodedPlaylist);
-      fs.writeFileSync(playlistPath, decoded);
-      console.log("📝 Received and saved playlist.m3u8 from client");
-    } catch (err) {
-      console.error("❌ Failed to decode or save playlist:", err);
-    }
-  } else {
-    console.warn("⚠️ No playlist data received");
-  }
+  segments.push(filename);
+
+  const playlist = [
+    "#EXTM3U",
+    "#EXT-X-VERSION:3",
+    `#EXT-X-TARGETDURATION:${segmentDuration}`,
+    `#EXT-X-MEDIA-SEQUENCE:0`,
+    ...segments.map((seg) => `#EXTINF:${segmentDuration}.000,\n${seg}`),
+    "#EXT-X-ENDLIST",
+    "",
+  ].join("\n");
+
+  fs.writeFileSync(playlistPath, playlist);
+  console.log("📝 Updated playlist.m3u8");
 
   res.status(200).send("OK");
+});
+
+app.get("/segments", (req, res) => {
+  fs.readdir(uploadDir, (err, files) => {
+    if (err) return res.status(500).json({ error: "Failed to list files" });
+    const tsSegments = files.filter((f) => f.endsWith(".ts")).sort();
+    res.json(tsSegments);
+  });
 });
 
 app.post("/reset", (req, res) => {
@@ -73,9 +80,48 @@ app.post("/reset", (req, res) => {
   res.status(200).send("Reset complete");
 });
 
-app.get("/debug-playlist", (req, res) => {
-  const playlistPath = path.join(uploadDir, "playlist.m3u8");
+app.get("/playlist.m3u8", (req, res) => {
+  const currentSegments = fs
+    .readdirSync(uploadDir)
+    .filter((f) => f.endsWith(".ts"))
+    .sort();
 
+  if (currentSegments.length === 0) {
+    const emptyPlaylist = [
+      "#EXTM3U",
+      "#EXT-X-VERSION:3",
+      `#EXT-X-TARGETDURATION:${segmentDuration}`,
+      "#EXT-X-MEDIA-SEQUENCE:0",
+      "#EXT-X-ENDLIST",
+    ].join("\n");
+
+    return res
+      .status(200)
+      .setHeader("Content-Type", "application/vnd.apple.mpegurl")
+      .send(emptyPlaylist);
+  }
+
+  segments = currentSegments;
+
+  const playlist = [
+    "#EXTM3U",
+    "#EXT-X-VERSION:3",
+    `#EXT-X-TARGETDURATION:${segmentDuration}`,
+    `#EXT-X-MEDIA-SEQUENCE:0`,
+    ...segments.map((seg) => `#EXTINF:${segmentDuration}.000,\n${seg}`),
+    "#EXT-X-ENDLIST",
+    "",
+  ].join("\n");
+
+  fs.writeFileSync(playlistPath, playlist);
+  console.log("🛠️ Rebuilt playlist.m3u8 from existing segments");
+
+  const content = fs.readFileSync(playlistPath, "utf-8");
+  res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
+  res.send(content);
+});
+
+app.get("/debug-playlist", (req, res) => {
   if (!fs.existsSync(playlistPath)) {
     return res.status(404).send("Playlist not found.");
   }

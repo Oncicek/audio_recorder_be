@@ -8,6 +8,7 @@
     <h1>HLS Player</h1>
     <button onclick="reloadAll()">🔁 Reload Segments</button>
     <button onclick="resetAll()">🧹 Reset All</button>
+
     <video
       id="video"
       controls
@@ -49,28 +50,19 @@
       async function loadSegmentList() {
         try {
           const res = await fetch(
-            "http://localhost:3000/debug-playlist?_=" + Date.now()
+            "http://localhost:3000/segments?_=" + Date.now()
           );
-          const text = await res.text();
-          const lines = text.split("\n");
+          const files = await res.json();
           let sequence = 0;
-          segmentList.innerHTML = lines
-            .map((line, index, arr) => {
-              if (line.endsWith(".ts")) {
-                const durationLine = arr[index - 1];
-                const durationMatch = durationLine.match(/#EXTINF:([\d\.]+),/);
-                const duration = durationMatch
-                  ? parseFloat(durationMatch[1])
-                  : 5;
-                return `<li><button onclick="playWrappedSegment('${line}', ${duration}, ${sequence++})">▶️ ${line} (${duration.toFixed(
-                  2
-                )}s)</button></li>`;
-              }
-              return "";
-            })
+          segmentList.innerHTML = files
+            .filter((f) => f.endsWith(".ts"))
+            .map(
+              (file) =>
+                `<li><button onclick="playWrappedSegment('${file}', 5, ${sequence++})">▶️ ${file}</button></li>`
+            )
             .join("");
         } catch (err) {
-          segmentList.innerHTML = `<li>Error loading segment list</li>`;
+          segmentList.innerHTML = `<li>Error loading segments</li>`;
         }
       }
 
@@ -98,12 +90,11 @@
         }
       }
 
-      function reloadAll() {
-        loadMainHls();
-        loadSegmentList();
-      }
-
       async function resetAll() {
+        const confirmed = confirm(
+          "Are you sure you want to delete all segments?"
+        );
+        if (!confirmed) return;
         const res = await fetch("http://localhost:3000/reset", {
           method: "POST",
         });
@@ -113,6 +104,11 @@
         } else {
           alert("Failed to reset segments.");
         }
+      }
+
+      function reloadAll() {
+        loadMainHls();
+        loadSegmentList();
       }
 
       reloadAll();
