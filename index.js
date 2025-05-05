@@ -67,16 +67,19 @@ app.get("/playlist.m3u8", (req, res) => {
     Math.max(...segmentMeta.map((s) => s.duration), segmentDuration)
   );
 
+  const body = segmentMeta.flatMap(({ filename, duration }, idx) => [
+    ...(idx > 0 ? ["#EXT-X-DISCONTINUITY"] : []),
+    `#EXTINF:${Number(duration).toFixed(3)},`,
+    filename,
+  ]);
+
   const playlist = [
     "#EXTM3U",
     "#EXT-X-VERSION:3",
     "#EXT-X-START:TIME-OFFSET=0",
     `#EXT-X-TARGETDURATION:${targetDuration}`,
     "#EXT-X-MEDIA-SEQUENCE:0",
-    ...segmentMeta.map(
-      ({ filename, duration }) =>
-        `#EXTINF:${Number(duration).toFixed(3)},\n${filename}`
-    ),
+    ...body,
     "#EXT-X-ENDLIST",
     "",
   ].join("\n");
