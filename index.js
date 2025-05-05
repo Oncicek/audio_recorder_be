@@ -2,39 +2,26 @@ import express from "express";
 import fs from "fs";
 import path from "path";
 import cors from "cors";
-import { execSync } from "child_process";
 
 const app = express();
 const PORT = 3000;
 const uploadDir = path.resolve("uploads");
-const playlistPath = path.join(uploadDir, "playlist.m3u8");
-const segmentDuration = 5; // default fallback
-
-app.use(cors());
-app.use(express.raw({ type: "*/*", limit: "10mb" }));
+const segmentDuration = 5;
 
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
+app.use(cors());
+app.use(express.raw({ type: "*/*", limit: "10mb" }));
 app.use(express.static(uploadDir));
 
-const segmentMeta = []; // Stores { filename, duration }
+const segmentMeta = []; // [{ filename, duration }]
 let recordingStopped = false;
-
-function getSegmentDuration(filename) {
-  try {
-    const result = execSync(
-      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${filename}"`
-    );
-    return parseFloat(result.toString().trim()) || segmentDuration;
-  } catch {
-    return segmentDuration;
-  }
-}
 
 app.post("/upload", (req, res) => {
   const filename = req.headers["x-filename"];
+  const duration = parseFloat(req.headers["x-duration"]);
 
   if (!filename || !filename.endsWith(".ts")) {
     return res.status(400).send("Only .ts segments are accepted");
@@ -44,110 +31,53 @@ app.post("/upload", (req, res) => {
   fs.writeFileSync(filepath, req.body);
   console.log("✅ Saved segment:", filename);
 
-  const duration = getSegmentDuration(filepath);
-  segmentMeta.push({ filename, duration });
-
-  const playlist = [
-    "#EXTM3U",
-    "#EXT-X-VERSION:3",
-    "#EXT-X-START:TIME-OFFSET=0",
-    `#EXT-X-TARGETDURATION:${Math.ceil(
-      Math.max(...segmentMeta.map((s) => s.duration), segmentDuration)
-    )}`,
-    "#EXT-X-MEDIA-SEQUENCE:0",
-    ...segmentMeta.map(
-      ({ filename, duration }) => `#EXTINF:${duration.toFixed(3)},\n${filename}`
-    ),
-    ...(recordingStopped ? ["#EXT-X-ENDLIST"] : []),
-    "",
-  ].join("\n");
-
-  fs.writeFileSync(playlistPath, playlist);
-  console.log("📝 Updated playlist.m3u8 with durations");
-
-  res.status(200).send("OK");
-});
-
-app.post("/stop", (req, res) => {
-  recordingStopped = true;
-  console.log(
-    "⏹️ Recording stopped, future playlists will include EXT-X-ENDLIST"
-  );
-  res.status(200).send("Recording marked as stopped.");
-});
-
-app.get("/segments", (req, res) => {
-  fs.readdir(uploadDir, (err, files) => {
-    if (err) return res.status(500).json({ error: "Failed to list files" });
-    const tsSegments = files.filter((f) => f.endsWith(".ts")).sort();
-    res.json(tsSegments);
-  });
-});
-
-app.post("/reset", (req, res) => {
-  const files = fs.readdirSync(uploadDir);
-  let deleted = 0;
-
-  for (const file of files) {
-    if (file.endsWith(".ts") || file.endsWith(".m3u8")) {
-      try {
-        fs.unlinkSync(path.join(uploadDir, file));
-        deleted++;
-      } catch (err) {
-        console.warn(`⚠️ Failed to delete: ${file}`);
-      }
-    }
+  // Remove if already exists
+  const existingIndex = segmentMeta.findIndex((s) => s.filename === filename);
+  if (existingIndex !== -1) {
+    segmentMeta.splice(existingIndex, 1);
   }
 
-  segmentMeta.length = 0;
-  recordingStopped = false;
+  segmentMeta.push({
+    filename,
+    duration: !isNaN(duration) ? duration : segmentDuration,
+  });
 
-  console.log(`🧹 Reset done. Deleted ${deleted} files.`);
-  res.status(200).send("Reset complete");
+  console.log("🧩 SegmentMeta now has", segmentMeta.length, "segments");
+  res.status(200).send("OK");
 });
 
 app.get("/playlist.m3u8", (req, res) => {
   if (segmentMeta.length === 0) {
-    const tsFiles = fs
-      .readdirSync(uploadDir)
-      .filter((f) => f.endsWith(".ts"))
-      .sort();
-
-    if (tsFiles.length === 0) {
-      return res
-        .status(200)
-        .setHeader("Content-Type", "application/vnd.apple.mpegurl")
-        .send(
-          [
-            "#EXTM3U",
-            "#EXT-X-VERSION:3",
-            "#EXT-X-START:TIME-OFFSET=0",
-            `#EXT-X-TARGETDURATION:${segmentDuration}`,
-            "#EXT-X-MEDIA-SEQUENCE:0",
-            "#EXT-X-ENDLIST",
-          ].join("\n")
-        );
-    }
-
-    const fallback = tsFiles.map((name) => ({
-      filename: name,
-      duration: segmentDuration,
-    }));
-    segmentMeta.push(...fallback);
+    return res
+      .status(200)
+      .setHeader("Content-Type", "application/vnd.apple.mpegurl")
+      .send(
+        [
+          "#EXTM3U",
+          "#EXT-X-VERSION:3",
+          "#EXT-X-START:TIME-OFFSET=0",
+          `#EXT-X-TARGETDURATION:${segmentDuration}`,
+          "#EXT-X-MEDIA-SEQUENCE:0",
+          "#EXT-X-ENDLIST",
+        ].join("\n")
+      );
   }
+
+  const targetDuration = Math.ceil(
+    Math.max(...segmentMeta.map((s) => s.duration), segmentDuration)
+  );
 
   const playlist = [
     "#EXTM3U",
     "#EXT-X-VERSION:3",
     "#EXT-X-START:TIME-OFFSET=0",
-    `#EXT-X-TARGETDURATION:${Math.ceil(
-      Math.max(...segmentMeta.map((s) => s.duration), segmentDuration)
-    )}`,
+    `#EXT-X-TARGETDURATION:${targetDuration}`,
     "#EXT-X-MEDIA-SEQUENCE:0",
     ...segmentMeta.map(
-      ({ filename, duration }) => `#EXTINF:${duration.toFixed(3)},\n${filename}`
+      ({ filename, duration }) =>
+        `#EXTINF:${Number(duration).toFixed(3)},\n${filename}`
     ),
-    ...(recordingStopped ? ["#EXT-X-ENDLIST"] : []),
+    "#EXT-X-ENDLIST",
     "",
   ].join("\n");
 
@@ -157,18 +87,45 @@ app.get("/playlist.m3u8", (req, res) => {
     .send(playlist);
 });
 
-app.get("/debug-playlist", (req, res) => {
-  if (!fs.existsSync(playlistPath)) {
-    return res.status(404).send("Playlist not found.");
+app.post("/reset", (req, res) => {
+  let deleted = 0;
+  for (const file of fs.readdirSync(uploadDir)) {
+    if (file.endsWith(".ts") || file.endsWith(".m3u8")) {
+      try {
+        fs.unlinkSync(path.join(uploadDir, file));
+        deleted++;
+      } catch (e) {
+        console.warn(`⚠️ Could not delete ${file}`);
+      }
+    }
   }
 
-  const content = fs.readFileSync(playlistPath, "utf-8");
+  segmentMeta.length = 0;
+  recordingStopped = false;
+  console.log(`🧹 Reset done. Deleted ${deleted} files.`);
+  res.status(200).send("Reset done");
+});
+
+app.get("/segments", (req, res) => {
+  fs.readdir(uploadDir, (err, files) => {
+    if (err) return res.status(500).json({ error: "Cannot list files" });
+    res.json(files.filter((f) => f.endsWith(".ts")).sort());
+  });
+});
+
+app.get("/debug-playlist", (req, res) => {
+  const playlist = segmentMeta
+    .map((s, i) => `${i + 1}. ${s.filename} (${s.duration.toFixed(3)}s)`)
+    .join("\n");
+
   res.setHeader("Content-Type", "text/plain");
-  res.send(content);
+  res.send(
+    segmentMeta.length
+      ? playlist
+      : "No segment metadata available. Playlist will be empty."
+  );
 });
 
 app.listen(PORT, () => {
-  console.log(
-    `🚀 CDN Proxy with dynamic playlist ready at http://localhost:${PORT}`
-  );
+  console.log(`🚀 HLS server running at http://localhost:${PORT}`);
 });
